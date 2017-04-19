@@ -1,0 +1,79 @@
+---
+#=============================================================================
+#filename      :roles/zabbix-server/main.yml
+#description   :Tasks for installing & configuring a zabbix server.  
+#               Depends on the host being in the correct host group in the 
+#               inventory & group_var definitions of zabbix_server and zabbix_proxy
+#author        :Shawn Green
+#date          :10/10/16
+#==============================================================================
+
+- name: Assert required variables
+  assert:
+    that:
+      - zabbix_server is defined
+      - zabbix_proxy is defined
+      - zabbix_mysql_username is defined
+      - zabbix_mysql_password is defined
+    msg: "Variables must be set!"
+
+- name: Check if mysql is installed
+  register: mysql_installed
+  always_run: true
+  stat:
+    path: /etc/my.cnf
+
+- name: Setup Zabbix Repo
+  when: mysql_installed.stat.exists
+  yum: name=http://repo.zabbix.com/zabbix/3.2/rhel/7/x86_64/zabbix-release-3.2-1.el7.noarch.rpm state=present update_cache=yes
+
+- name: Install Necessary Packages
+  when: mysql_installed.stat.exists
+  yum: name={{ item }} state=present
+  with_items:
+    - zabbix-server-mysql
+    - zabbix-web-mysql
+    - zabbix-agent
+    - zabbix-get
+    - httpd
+
+- name: Copy zabbix my.cnf
+  template: src=zabbix-my.cnf.j2 dest=/etc/zabbix/.my.cnf owner=zabbix group=zabbix mode=0600
+
+- name: Copy Zabbix specific mysql config
+  copy: src=my.cnf dest=/etc/my.cnf owner=root group=root mode=0644
+
+- name: Restart mysqld
+  service: name=mysqld state=restarted
+
+- name: Create mysql database
+  mysql_db: name=zabbix collation=utf8_bin encoding=utf8 state=present
+
+- name: Create zabbix user in mysql
+  mysql_user: name={{ zabbix_mysql_username }} password={{ zabbix_mysql_password }} priv=zabbix.*:ALL state=present
+
+- name: Populate zabbix database
+  mysql_db: state=import name=zabbix target=/usr/share/doc/zabbix-server-mysql-3.2.1/create.sql.gz
+
+- name: Copy zabbix-server config
+  template: src=zabbix_server.conf.j2 dest=/etc/zabbix/zabbix_server.conf owner=root group=root mode=0644
+
+- name: Open firewalld port for zabbix & httpd
+  firewalld: port={{ item }} permanent=true state=enabled immediate=true
+  with_items:
+    - 10050/tcp
+    - 10051/tcp
+    - 80/tcp
+    - 443/tcp
+
+- name: Start zabbix-server & enable at boot
+  service: name=zabbix-server state=restarted enabled=yes
+
+- name: Configure Apache
+  template: src=httpd-zabbix.conf.j2 dest=/etc/httpd/conf.d/zabbix.conf owner=root group=root mode=0644
+
+- name: Restart Apache & enable at startup
+  service: name=httpd state=restarted enabled=yes
+
+- name: Fin
+  debug: msg="Go to http://{{ ansible_fqdn }}/zabbix to finish installation"
